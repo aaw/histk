@@ -1,0 +1,4 @@
+Files in this directory:
+
+ping_data: Response time, in milliseconds, from 50,000 successive calls to
+           `ping facebook.com`. One sample per line.

@@ -1,0 +1,34 @@
+#!/usr/bin/env ruby
+require 'redis'
+
+require_relative 'lossless_histogram'
+
+if ARGV.length < 1 || ARGV.length > 2
+  fail "Usage: analyze data_file [comma-separated list of quantiles]"
+end
+fail "REDIS_PORT environment variable unset." unless ENV['REDIS_PORT']
+
+quantiles = [0.0001, 0.001, 0.01, 0.05, 0.1,
+             0.25, 0.5, 0.75,
+             0.9, 0.95, 0.99, 0.999, 0.9999]
+if ARGV.length == 2
+  quantiles =
+    ARGV[1].split(',').map(&:strip).select{ |x| !x.empty? }.map(&:to_f)
+end
+
+r = Redis.new(host: 'localhost', port: ENV['REDIS_PORT']).client
+values = []
+File.open(ARGV[0]).each_line do |line|
+  r.call(['histk.add', 's', line.strip])
+  values << line.strip.to_f
+end
+h = LosslessHistogram.new(values)
+format = '%-15s %-25s %-25s %-25s'
+puts format % ['Quantile', 'Actual', 'HISTK.QUANTILE', 'Relative Error']
+puts format % ['-' * 15, '-' * 25, '-' * 25, '-' * 25]
+quantiles.each do |q|
+  actual = h.quantile(q)
+  histk = r.call(['histk.quantile', 's', q]).to_f
+  error = (actual - histk).abs / [actual.abs, histk.abs, Float::EPSILON].max
+  puts format % [q, actual, histk, error]
+end
