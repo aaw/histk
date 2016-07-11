@@ -32,7 +32,6 @@
 #define HISTK_STR_MAX_CENTROIDS STR(HISTK_MAX_NUM_CENTROIDS)
 #define HISTK_ERRORMSG_COUNTNOTINT    "ERR count is not an integer."
 #define HISTK_ERRORMSG_VALUENOTDOUBLE "ERR value is not a double."
-#define HISTK_ERRORMSG_BADEMPTYKEYSET "ERR problem setting value for empty key."
 #define HISTK_ERRORMSG_BADQUANTILE    "ERR argument must be in the range " \
                                       "[0.0, 1.0]."
 #define HISTK_ERRORMSG_EMPTYSKETCH    "ERR empty histogram."
@@ -49,17 +48,17 @@ struct Centroid {
 };
 
 struct HistK {
-    // Array of centroids, sorted by value.
+    // Array of centroids, sorted by increasing value.
     struct Centroid *cs;
     // Total number of values observed by the sketch.
     unsigned long long totalCount;
-    // Minimum value ever added to the sketch..
+    // Minimum value observed by the sketch.
     double min;
-    // Maximum value ever added to the sketch.
+    // Maximum value observed by the sketch.
     double max;
-    // Current number of centroids in this sketch..
+    // Current number of centroids in the sketch.
     unsigned short int numCentroids;
-    // Maximum number of centroids allowed in this sketch.
+    // Maximum number of centroids allowed in the sketch.
     unsigned short int maxCentroids;
 };
 
@@ -95,6 +94,7 @@ inline void mergeCentroidWithNext(struct HistK* h, unsigned int i) {
 void add(struct HistK *h, double value, unsigned long long count) {
     if (value < h->min) { h->min = value; }
     if (value > h->max) { h->max = value; }
+
     // Find the index k in the sorted list of centroids where (value, count)
     // belongs.
     int i = h->numCentroids - 1;
@@ -159,8 +159,8 @@ void getBorderingCentroids(const struct HistK *h, unsigned int i,
 }
 
 // Return an estimate of the smallest value V observed by the sketch such that
-// q * h->totalCount elements observed were less than or equal to V. Only q
-// values in the range [0.0, 1.0] are valid arguments.
+// q * h->totalCount elements observed were less than or equal to V. q must be
+// in the range [0.0, 1.0].
 double quantile(const struct HistK *h, double q) {
     double t = q * h->totalCount;
     int i = 0;
@@ -181,9 +181,9 @@ double quantile(const struct HistK *h, double q) {
     // Solve for u such that
     // t - s = (ci.count + mu) / 2 * (u-ci.value) / (cj.value - ci.value), where
     // mu = ci.count + (u-ci.value) * (cj.count-ci.count) / (cj.value-ci.value).
-    // You can solve for such a u using the quadratic equation as long as
-    // ci.count != cj.count, in which case the solution is a little bit simpler.
-    // See Algorithm 4 and its description in the Ben-Haim/Tom-Tov paper.
+    // You can solve for such a u using the quadratic formula as long as
+    // ci.count != cj.count. See Algorithm 4 and its description in the
+    // Ben-Haim/Tom-Tov paper.
     double d = t - s;
     double a = cj.count - ci.count;
     if (a == 0.0) {
@@ -198,7 +198,7 @@ double quantile(const struct HistK *h, double q) {
 // Return an estimate of the number of values observed by the sketch that are
 // less than or equal to <v>. This is essentially the "Sum" procedure described
 // in Ben-Haim and Tom-Tov's paper.
-long long countLessThan(const struct HistK *h, double v) {
+long long countLessThanOrEqual(const struct HistK *h, double v) {
     if (v >= h->max) {
         return h->totalCount;
     } else if (v < h->min) {
@@ -323,7 +323,7 @@ int CountCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     if (RedisModule_StringToDouble(argv[2], &v) == REDISMODULE_ERR) {
         return RedisModule_ReplyWithError(ctx, HISTK_ERRORMSG_VALUENOTDOUBLE);
     }
-    return RedisModule_ReplyWithLongLong(ctx, countLessThan(h, v));
+    return RedisModule_ReplyWithLongLong(ctx, countLessThanOrEqual(h, v));
 }
 
 /* HISTK.MERGESTORE <KEY> HIST1 [HIST2] ... [HISTN]
@@ -465,7 +465,7 @@ void HistKFree(void *value) {
 
 /* Registering the module */
 int RedisModule_OnLoad(RedisModuleCtx *ctx) {
-  if (RedisModule_Init(ctx, "hist", HISTK_MODULE_VERSION, REDISMODULE_APIVER_1)
+  if (RedisModule_Init(ctx, "histk", HISTK_MODULE_VERSION, REDISMODULE_APIVER_1)
       == REDISMODULE_ERR) {
       return REDISMODULE_ERR;
     }

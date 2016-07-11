@@ -10,9 +10,9 @@ The Ben-Haim/Tom-Tov sketch uses a fixed amount of space (about 1KB by default) 
 of the number of values observed and returns good estimates of quantiles and counts
 of values observed below a threshold.
 
-The sketch is a list of centroids, which are (value, count) pairs.
+The sketch is a list of centroids. Each centroid is a (value, count) pair.
 Whenever a new value is added to the sketch, it's added as
-a (value, 1) centroid, then the two centroids in the sketch with smallest difference in values
+a (value, 1) centroid and the two centroids in the sketch with smallest difference in values
 are found and merged together by summing their counts and averaging their values. Quantiles and
 sums are estimated by viewing two neighboring
 centroids (v1, c1) and (v2, c2) as a right trapezoid (along with the additional points
@@ -24,8 +24,8 @@ Commands
 
 *  `HISTK.ADD key value1 [count1] [value2 count2 ...]`:
    Adds values to the sketch. Returns the total number of values observed by the
-   sketch. When counts are specified, can be used to add multiple observations of
-   the same value in one command.
+   sketch so far. When counts are specified, can be used to add multiple observations
+   of the same value in one command.
 
 *  `HISTK.QUANTILE key q`:
    Returns an estimate of the q-quantile, the smallest value V observed by the sketch
@@ -33,18 +33,21 @@ Commands
    Only q values in the range [0.0, 1.0] are valid arguments.
 
 * `HISTK.COUNT key [value]`:
-   Returns an estimate of of the number of values <= value observed by the sketch.
-   If value is omitted, returns the total number of values observed by the sketch so far.
+   Returns an estimate of of the number of values observed by the sketch that are at most
+   the given value. If value is omitted, returns the total number of values observed by
+   the sketch so far.
 
 * `HISTK.MERGESTORE key hist1 [hist2] ... [histn]`:
-   Merges hist1 ... histn, storing the results in key. If there's already a histogram
-   sketch in key before this command is called, the results are merged into that
-   sketch.
+   Merges hist1, hist2, ... histn, storing the results in the given key. If there's
+   already a histogram sketch in the key before this command is called, the results are
+   merged into that sketch.
 
 * `HISTK.RESIZE key numcentroids`:
    Resize the sketch to numcentroids centroids. In most cases, this should be
    called once before values are added to the sketch. If called on an existing
-   sketch with a smaller number of centroids, some centroids will be merged.
+   sketch with a smaller number of centroids than the sketch currently has, some
+   centroids will be merged. The default number of centroids in each sketch is 64
+   unless `HISTK.RESIZE` is called.
 
 Trying the module
 -----------------
@@ -58,12 +61,13 @@ After you've built the image, you can either run a shell in the image:
 
 ```docker run -it histk```
 
-and use `redis-cli` to connect inside the container or daemonize the container and
-expose Redis over a port on your host machine:
+and use `redis-cli` to connect inside the container. Alternatively, you can
+daemonize the container and expose Redis over a port on your host machine instead:
 
 ```docker run -p $LOCAL_PORT:9999 -d histk tail -f /var/log/redis.log```
 
-then use `redis-cli` on your host machine to connect to Redis at `$LOCAL_PORT`.
+then use `redis-cli` on your host machine to connect to the Redis instance running
+inside the container over `$LOCAL_PORT`.
 
 Using the module
 ----------------
