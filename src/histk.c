@@ -25,8 +25,12 @@
 
 #define HISTK_MODULE_VERSION 1
 #define HISTK_ENCODING_VERSION 0
+
 #define HISTK_DEFAULT_NUM_CENTROIDS 64
 #define HISTK_MAX_NUM_CENTROIDS 2048
+#define HISTK_DEFAULT_MERGE_ARRAY_SIZE HISTK_DEFAULT_NUM_CENTROIDS * 3
+#define HISTK_EPSILON 10e-7
+
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 #define HISTK_STR_MAX_CENTROIDS STR(HISTK_MAX_NUM_CENTROIDS)
@@ -82,12 +86,28 @@ void freeHistK(struct HistK *o) {
     RedisModule_Free(o);
 }
 
-// Merge the centroid at h->cs[i+1] into the centroid at h->cs[i].
-inline void mergeCentroidWithNext(struct HistK* h, unsigned int i) {
-    long long s = h->cs[i].count + h->cs[i+1].count;
-    h->cs[i].value = ((h->cs[i].value * h->cs[i].count) +
-                      (h->cs[i+1].value * h->cs[i+1].count)) / s;
-    h->cs[i].count = s;
+// Merge the centroid at cs[i+1] into the centroid at h->cs[i].
+inline void mergeCentroidWithNext(struct Centroid *cs, unsigned int i) {
+    long long s = cs[i].count + cs[i+1].count;
+    cs[i].value = ((cs[i].value * cs[i].count) +
+                   (cs[i+1].value * cs[i+1].count)) / s;
+    cs[i].count = s;
+}
+
+// Find index i where |h->cs[i].value - h->cs[i+1].value| is minimized. If there
+// are multiple nearly equal minimums, we'll choose one uniformly at random.
+int findMinimumCentroidPair(const struct Centroid *cs, int cn) {
+    unsigned int mi = cn - 1;
+    double md = DBL_MAX;
+    unsigned int n = 1;
+    for(int i = 0; i < cn - 1; i++) {
+        double d = fabs(cs[i+1].value - cs[i].value);
+        if (d < md || (fabs(d - md) < HISTK_EPSILON && rand() * n++ < 1.0)) {
+            mi = i;
+            md = d;
+        }
+    }
+    return mi;
 }
 
 // Add <count> <value>s to the sketch.
@@ -117,20 +137,9 @@ void add(struct HistK *h, double value, unsigned long long count) {
         return;
     }
 
-    // Find index where |h->cs[i].value - h->cs[i+1].value| is minimized.
-    unsigned int mi = h->numCentroids - 1;
-    double md = DBL_MAX;
-    unsigned int n = 1;
-    for(int i = 0; i < h->numCentroids - 1; i++) {
-      double d = fabs(h->cs[i+1].value - h->cs[i].value);
-      if (d < md || (d == md && rand() * n++ < 1.0)) {
-	mi = i;
-	md = d;
-      }
-    }
-
-    // Merge centroids in h->cs[i] and h->cs[i+1].
-    mergeCentroidWithNext(h, mi);
+    // Find closest pair of centroids and merge them together.
+    int mi = findMinimumCentroidPair(h->cs, h->numCentroids);
+    mergeCentroidWithNext(h->cs, mi);
     h->numCentroids--;
     for(int i = mi + 1; i < h->numCentroids; i++) {
       h->cs[i] = h->cs[i+1];
@@ -222,6 +231,80 @@ long long countLessThanOrEqual(const struct HistK *h, double v) {
     double b = ci.count + (cj.count - ci.count) * x;
     double est = s + ci.count / 2.0 + (ci.count + b) * x / 2.0;
     return (long long)round(est);
+}
+
+// qsort comparator for Centroid.
+static int sortCentroids(const void *x, const void *y) {
+    const struct Centroid *cx = x, *cy = y;
+    if (cx->value > cy->value) {
+        return 1;
+    } else if (cx->value < cy->value) {
+        return -1;
+    } else {
+        return 0;
+    }
+}
+
+// Reduce the Centroid array cs, of length cn, to a Centroid array rs, of length
+// rn, by computing the optimal merge into min{cn, rn} centroids. The merged
+// array that is generated is optimal in the sense that it minimizes the sum of
+// distances of each centroid in cs to the centroid its merged into in rs over
+// all choices of an m centroid decomposition. Returns the total number of
+// centroids stored in rs.
+//
+// The input array cs is used as a workspace and is modified by this method.
+int mergeCentroidList(struct Centroid *cs, int cn,
+                      struct Centroid *rs, int rn) {
+    if (cn < 1) { return 0; }
+    qsort(cs, cn, sizeof(struct Centroid), sortCentroids);
+
+    // Merging centroids with the same value is easy: just sum the counts. Do
+    // this first.
+    int f = 0;
+    for (int i = 1; i < cn; i++) {
+        if (cs[i].value == cs[i-1].value) {
+            cs[f].count += cs[i].count;
+        } else {
+            f++;
+            cs[f] = cs[i];
+        }
+    }
+    cn = f + 1;
+
+    while (cn > rn) {
+        // Find closest pair of centroids and merge them together.
+        int mi = findMinimumCentroidPair(cs, cn);
+        mergeCentroidWithNext(cs, mi);
+        cn--;
+        for(int i = mi + 1; i < cn; i++) {
+            cs[i] = cs[i+1];
+        }
+    }
+
+    // Copy merged centroids over to results.
+    for (int i = 0; i < cn; i++) {
+        rs[i] = cs[i];
+    }
+    return cn;
+}
+
+// Add Centroid c to the array of Centroids cs at index i. cs has max length n,
+// and if i >= n, resize the underlying array so that c can be added at index i.
+// Returns the max size of the array after c has been added to index i.
+int addToDynamicCentroidArray(struct Centroid **cs, int i, int n,
+                              const struct Centroid c) {
+    while (i >= n) {
+        struct Centroid *newCs =
+            RedisModule_Alloc(n * 2 * sizeof(struct Centroid));
+        for (int j = 0; j < n; j++) {
+            newCs[j] = (*cs)[j];
+        }
+        n *= 2;
+        RedisModule_Free(*cs);
+        *cs = newCs;
+    }
+    (*cs)[i] = c;
+    return n;
 }
 
 /* HISTK.ADD <KEY> <VALUE1> [<COUNT1>] [<VALUE2> <COUNT2>, ...]
@@ -334,7 +417,6 @@ int CountCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 int MergeStoreCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     RedisModule_AutoMemory(ctx);
     if (argc < 3) return RedisModule_WrongArity(ctx);
-
     RedisModuleKey *key = RedisModule_OpenKey(
         ctx, argv[1], REDISMODULE_READ|REDISMODULE_WRITE);
     int keytype = RedisModule_KeyType(key);
@@ -350,7 +432,16 @@ int MergeStoreCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     } else {
         h = RedisModule_ModuleTypeGetValue(key);
     }
-
+    int count = 0;
+    int maxSize = HISTK_DEFAULT_MERGE_ARRAY_SIZE;
+    struct Centroid* centroids = RedisModule_Alloc(
+        HISTK_DEFAULT_MERGE_ARRAY_SIZE * sizeof(struct Centroid));
+    for (int i = 0; i < h->numCentroids; i++) {
+        maxSize = addToDynamicCentroidArray(&centroids, count++, maxSize,
+                                            h->cs[i]);
+    }
+    double min = h->min;
+    double max = h->max;
     for (int iarg = 2; iarg < argc; iarg++) {
         RedisModuleKey *akey = RedisModule_OpenKey(ctx, argv[iarg],
                                                    REDISMODULE_READ);
@@ -364,8 +455,22 @@ int MergeStoreCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         }
         struct HistK *ah = RedisModule_ModuleTypeGetValue(akey);
         for (int i = 0; i < ah->numCentroids; i++) {
-            add(h, ah->cs[i].value, ah->cs[i].count);
+            maxSize = addToDynamicCentroidArray(&centroids, count++, maxSize,
+                                                ah->cs[i]);
         }
+        if (ah->min < min) min = ah->min;
+        if (ah->max > max) max = ah->max;
+    }
+
+    int numMerged = mergeCentroidList(centroids, count, h->cs, h->maxCentroids);
+    RedisModule_Free(centroids);
+
+    h->numCentroids = numMerged;
+    h->min = min;
+    h->max = max;
+    h->totalCount = 0;
+    for (int i = 0; i < h->numCentroids; i++) {
+        h->totalCount += h->cs[i].count;
     }
 
     RedisModule_ReplyWithLongLong(ctx, h->totalCount);
