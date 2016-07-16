@@ -209,6 +209,23 @@ class TestHistk < Test::Unit::TestCase
     assert_operator((y - z).abs, :<, error)
   end
 
+  def test_merge_small
+    %w(s t u v w).each { |hist| @r.call(['histk.resize', hist, 4]) }
+    (1..100).each { |i| @r.call(['histk.add', 's', i]) }
+    (101..200).each { |i| @r.call(['histk.add', 't', i]) }
+    (201..300).each { |i| @r.call(['histk.add', 'u', i]) }
+    assert_equal(200, @r.call(%w(histk.mergestore v s t)))
+    assert_equal(300, @r.call(%w(histk.mergestore w s t u)))
+    assert_equal(600, @r.call(%w(histk.mergestore w s t u)))
+    assert_equal(900, @r.call(%w(histk.mergestore w s t u)))
+    error = 1.5  # Arbitrary
+    x = @r.call(%w(histk.quantile s 0.50)).to_f
+    y = @r.call(%w(histk.quantile v 0.25)).to_f
+    z = @r.call(%w(histk.quantile w 0.17)).to_f
+    assert_operator((x - y).abs, :<, error)
+    assert_operator((y - z).abs, :<, error)
+  end
+
   def test_rdb
     @r.call(%w(histk.add s 100))
     @r.call(%w(histk.add s 200))
